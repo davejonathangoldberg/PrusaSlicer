@@ -65,6 +65,7 @@
 #include "NotificationManager.hpp"
 #include "Preferences.hpp"
 #include "WebViewPanel.hpp"
+#include "CPAMTracePanel.hpp"
 #include "UserAccount.hpp"
 
 #ifdef _WIN32
@@ -696,6 +697,11 @@ void MainFrame::init_tabpanel()
 #endif // !__APPLE__
 
         wxWindow* panel = m_tabpanel->GetCurrentPage();
+        if (auto* trace_panel = dynamic_cast<CPAMTracePanel*>(panel)) {
+            trace_panel->refresh();
+            m_last_selected_tab = m_tabpanel->GetSelection();
+            return;
+        }
         Tab* tab = dynamic_cast<Tab*>(panel);
 
         // There shouldn't be a case, when we try to select a tab, which doesn't support a printer technology
@@ -807,6 +813,7 @@ void MainFrame::create_preset_tabs()
     
     m_printables_webview = new PrintablesWebViewPanel(m_tabpanel);
     add_printables_webview_tab();
+    m_tabpanel->AddNewPage(new CPAMTracePanel(m_tabpanel), _L("CPAM Trace"), "");
    
     m_connect_webview = new ConnectWebViewPanel(m_tabpanel);
     m_printer_webview = new PrinterWebViewPanel(m_tabpanel, L"");

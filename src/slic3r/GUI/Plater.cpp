@@ -116,6 +116,7 @@
 #include "Jobs/PlaterWorker.hpp"
 #include "Jobs/BoostThreadWorker.hpp"
 #include "BackgroundSlicingProcess.hpp"
+#include "PrintTrace.hpp"
 #include "PrintHostDialogs.hpp"
 #include "../Utils/ASCIIFolding.hpp"
 #include "../Utils/PrintHost.hpp"
@@ -564,7 +565,7 @@ struct Plater::priv
 			GUI::show_error(this->q, msg);
 		}
 	}
-    void export_gcode(fs::path output_path, bool output_path_on_removable_media, PrintHostJob upload_job);
+    void export_gcode(fs::path output_path, bool output_path_on_removable_media, PrintHostJob upload_job, uint64_t trace_id = 0);
     void reload_from_disk();
     bool replace_volume_with_stl(int object_idx, int volume_idx, const fs::path& new_path, const wxString& snapshot = "");
     void replace_with_stl();
@@ -2686,8 +2687,12 @@ bool Plater::priv::restart_background_process(unsigned int state)
     return false;
 }
 
-void Plater::priv::export_gcode(fs::path output_path, bool output_path_on_removable_media, PrintHostJob upload_job)
+void Plater::priv::export_gcode(fs::path output_path, bool output_path_on_removable_media, PrintHostJob upload_job, uint64_t trace_id)
 {
+    bool trace_scheduled = false;
+    ScopeGuard trace_guard{[&] {
+        if (!trace_scheduled) PrintTrace::end_export(trace_id, "failed", "export_failed");
+    }};
     wxCHECK_RET(!(output_path.empty() && upload_job.empty()), "export_gcode: output_path and upload_job empty");
     
     if (model.objects.empty())
@@ -2708,7 +2713,8 @@ void Plater::priv::export_gcode(fs::path output_path, bool output_path_on_remova
 
     show_warning_dialog = true;
     if (! output_path.empty()) {
-        background_process.schedule_export(output_path.string(), output_path_on_removable_media);
+        background_process.schedule_export(output_path.string(), output_path_on_removable_media, trace_id);
+        trace_scheduled = true;
         notification_manager->push_delayed_notification(NotificationType::ExportOngoing, []() {return true; }, 1000, 0);
     } else {
         background_process.schedule_upload(std::move(upload_job));
@@ -5930,7 +5936,7 @@ std::optional<wxString> Plater::check_output_path_has_error(const boost::filesys
     return std::nullopt;
 };
 
-std::optional<fs::path> Plater::get_output_path(const std::string &start_dir, const fs::path &default_output_file) {
+std::optional<fs::path> Plater::get_output_path(const std::string &start_dir, const fs::path &default_output_file, PrintTrace::SaveTime &accepted_at) {
     const std::string ext = default_output_file.extension().string();
     wxFileDialog dlg(this, (printer_technology() == ptFFF) ? _L("Save G-code file as:") : _L("Save SL1 / SL1S file as:"),
         start_dir,
@@ -5944,6 +5950,7 @@ std::optional<fs::path> Plater::get_output_path(const std::string &start_dir, co
         return std::nullopt;
     }
 
+    accepted_at = PrintTrace::SaveTime::now();
     const fs::path output_path{into_path(dlg.GetPath())};
     if (auto error{check_output_path_has_error(output_path)}) {
         const t_link_clicked on_link_clicked = [](const std::string& key) -> void { wxGetApp().jump_to_option(key); };
@@ -5989,14 +5996,17 @@ void Plater::export_gcode(bool prefer_removable)
     const fs::path &default_output_file{*optional_default_output_file};
     const std::string start_dir{get_output_start_dir(prefer_removable, default_output_file)};
 
-    const auto optional_output_path{get_output_path(start_dir, default_output_file)};
+    PrintTrace::SaveTime accepted_at;
+    const auto optional_output_path{get_output_path(start_dir, default_output_file, accepted_at)};
     if (!optional_output_path) {
         return;
     }
     const fs::path &output_path{*optional_output_path};
 
     export_gcode_to_path(output_path, [&](const bool path_on_removable_media){
-        p->export_gcode(output_path, path_on_removable_media, PrintHostJob());
+        const uint64_t trace_id = printer_technology() == ptFFF ?
+            PrintTrace::begin_export(output_path.string(), path_on_removable_media, accepted_at) : 0;
+        p->export_gcode(output_path, path_on_removable_media, PrintHostJob(), trace_id);
     });
 }
 
@@ -6107,6 +6117,7 @@ void Plater::export_all_gcodes(bool prefer_removable) {
     if (dialog.ShowModal() != wxID_OK) {
         return;
     }
+    const auto accepted_at = PrintTrace::SaveTime::now();
     const std::vector<std::pair<int, std::optional<fs::path>>> output_paths{dialog.get_paths()};
 
     bool path_on_removable_media{false};
@@ -6126,10 +6137,13 @@ void Plater::export_all_gcodes(bool prefer_removable) {
                 export_gcode_to_path(
                     path,
                     [&](const bool on_removable){
-                        this->p->background_process.finalize_gcode(
-                            path.string(),
-                            path_on_removable_media
-                        );
+                        const uint64_t trace_id = PrintTrace::begin_export(path.string(), on_removable, accepted_at);
+                        try {
+                            this->p->background_process.finalize_gcode(path.string(), on_removable, trace_id);
+                        } catch (...) {
+                            PrintTrace::end_export(trace_id, "failed", "export_failed");
+                            throw;
+                        }
                         path_on_removable_media = on_removable || path_on_removable_media;
                     }
                 );

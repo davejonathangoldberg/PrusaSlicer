@@ -42,6 +42,9 @@ set(SLIC3R_GUI_SOURCES
     GUI/KBShortcutsDialog.hpp
     GUI/BackgroundSlicingProcess.cpp
     GUI/BackgroundSlicingProcess.hpp
+    GUI/CPAMTracePanel.cpp
+    GUI/CPAMTracePanel.hpp
+    GUI/CPAMTracePlot.hpp
     GUI/BitmapCache.cpp
     GUI/BitmapCache.hpp
     GUI/ConfigSnapshotDialog.cpp
@@ -143,6 +146,9 @@ set(SLIC3R_GUI_SOURCES
     GUI/Sidebar.hpp
     GUI/Plater.cpp
     GUI/Plater.hpp
+    GUI/PrintTrace.cpp
+    GUI/PrintTrace.hpp
+    GUI/PrintTraceApp.cpp
     GUI/LoadStepDialog.cpp
     GUI/LoadStepDialog.hpp
     GUI/PresetComboBoxes.hpp

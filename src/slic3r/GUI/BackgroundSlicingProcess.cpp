@@ -5,6 +5,7 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 #include "BackgroundSlicingProcess.hpp"
+#include "PrintTrace.hpp"
 #include "GUI_App.hpp"
 #include "GUI.hpp"
 #include "MainFrame.hpp"
@@ -175,7 +176,7 @@ void BackgroundSlicingProcess::process_fff()
 	if (this->set_step_started(bspsGCodeFinalize)) {
 	    if (! m_export_path.empty()) {
 			wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, new wxCommandEvent(m_event_export_began_id));
-			finalize_gcode(m_export_path, m_export_path_on_removable_media);
+			finalize_gcode(m_export_path, m_export_path_on_removable_media, m_export_trace_id);
 	    } else if (! m_upload_job.empty()) {
 			wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, new wxCommandEvent(m_event_export_began_id));
 			prepare_upload(m_upload_job);
@@ -263,6 +264,10 @@ void BackgroundSlicingProcess::thread_proc()
 		lck.lock();
 		m_state = m_print->canceled() ? STATE_CANCELED : STATE_FINISHED;
 		if (m_print->cancel_status() != Print::CANCELED_INTERNAL) {
+            if (m_state == STATE_CANCELED)
+                GUI::PrintTrace::end_export(m_export_trace_id, "cancelled", "export_cancelled");
+            else if (exception)
+                GUI::PrintTrace::end_export(m_export_trace_id, "failed", "export_failed");
 			// Only post the canceled event, if canceled by user.
 			// Don't post the canceled event, if canceled from Print::apply().
 			SlicingProcessCompletedEvent evt(m_event_finished_id, 0, 
@@ -617,7 +622,7 @@ void BackgroundSlicingProcess::set_task(const PrintBase::TaskParams &params)
 }
 
 // Set the output path of the G-code.
-void BackgroundSlicingProcess::schedule_export(const std::string &path, bool export_path_on_removable_media)
+void BackgroundSlicingProcess::schedule_export(const std::string &path, bool export_path_on_removable_media, uint64_t trace_id)
 { 
 	assert(m_export_path.empty());
 	if (! m_export_path.empty())
@@ -628,6 +633,7 @@ void BackgroundSlicingProcess::schedule_export(const std::string &path, bool exp
 	this->invalidate_step(bspsGCodeFinalize);
 	m_export_path = path;
 	m_export_path_on_removable_media = export_path_on_removable_media;
+	m_export_trace_id = trace_id;
 }
 
 void BackgroundSlicingProcess::schedule_upload(Slic3r::PrintHostJob upload_job)
@@ -649,6 +655,7 @@ void BackgroundSlicingProcess::reset_export()
 	if (! this->running()) {
 		m_export_path.clear();
 		m_export_path_on_removable_media = false;
+        GUI::PrintTrace::end_export(m_export_trace_id.exchange(0), "cancelled", "export_cancelled");
 		// invalidate_step expects the mutex to be locked.
 		std::scoped_lock<std::mutex> lock(m_print->state_mutex());
 		this->invalidate_step(bspsGCodeFinalize);
@@ -684,7 +691,7 @@ bool BackgroundSlicingProcess::invalidate_all_steps()
 // G-code is generated in m_temp_output_path.
 // Optionally run a post-processing script on a copy of m_temp_output_path.
 // Copy the final G-code to target location (possibly a SD card, if it is a removable media, then verify that the file was written without an error).
-void BackgroundSlicingProcess::finalize_gcode(const std::string &path, const bool path_on_removable_media)
+void BackgroundSlicingProcess::finalize_gcode(const std::string &path, bool path_on_removable_media, uint64_t trace_id)
 {
 	m_print->set_status(95, _u8L("Running post-processing scripts"));
 
@@ -697,6 +704,7 @@ void BackgroundSlicingProcess::finalize_gcode(const std::string &path, const boo
 	// is calculated for the unprocessed G-code and it references lines in the memory mapped G-code file by line numbers.
 	// export_path may be changed by the post-processing script as well if the post processing script decides so, see GH #6042.
 	bool post_processed = run_post_process_scripts(output_path, true, "File", export_path, m_fff_print->full_print_config());
+    GUI::PrintTrace::record_export(trace_id, "gcode_ready");
 	auto remove_post_processed_temp_file = [post_processed, &output_path]() {
 		if (post_processed)
 			try {
@@ -711,7 +719,16 @@ void BackgroundSlicingProcess::finalize_gcode(const std::string &path, const boo
 	int copy_ret_val = CopyFileResult::SUCCESS;
 	try
 	{
-		copy_ret_val = copy_file(output_path, export_path, error_message, path_on_removable_media);
+        if (trace_id != 0 && boost::filesystem::path(export_path).parent_path() != boost::filesystem::path(path).parent_path()) {
+            // A post-processing script can change the export directory.
+            const auto directory = boost::filesystem::path(export_path).parent_path().string();
+            path_on_removable_media = GUI::wxGetApp().removable_drive_manager()->is_path_on_removable_drive(directory);
+        }
+        GUI::PrintTrace::record_export(trace_id, path_on_removable_media ? "sd_write_started" : "local_write_started");
+        copy_ret_val = copy_file(output_path, export_path, error_message, path_on_removable_media);
+        if (copy_ret_val == CopyFileResult::SUCCESS)
+            GUI::PrintTrace::end_export(trace_id, "gcode_saved",
+                path_on_removable_media ? "gcode_on_sd" : "gcode_saved_local", export_path);
 		remove_post_processed_temp_file();
 	}
 	catch (...)

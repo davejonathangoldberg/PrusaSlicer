@@ -6,6 +6,8 @@
 #ifndef slic3r_GUI_BackgroundSlicingProcess_hpp_
 #define slic3r_GUI_BackgroundSlicingProcess_hpp_
 
+#include <atomic>
+#include <cstdint>
 #include <string>
 #include <condition_variable>
 #include <mutex>
@@ -150,7 +152,7 @@ public:
 
 	// Set the export path of the G-code.
 	// Once the path is set, the G-code 
-	void schedule_export(const std::string &path, bool export_path_on_removable_media);
+	void schedule_export(const std::string &path, bool export_path_on_removable_media, uint64_t trace_id = 0);
 	// Set print host upload job data to be enqueued to the PrintHostJobQueue
 	// after current print slicing is complete
 	void schedule_upload(Slic3r::PrintHostJob upload_job);
@@ -184,7 +186,7 @@ public:
     // This "finished" flag does not account for the final export of the output file (.gcode or zipped PNGs),
     // and it does not account for the OctoPrint scheduling.
     bool    finished() const { return m_print->finished(); }
-	void finalize_gcode(const std::string &path, const bool path_on_removable_media);
+	void finalize_gcode(const std::string &path, bool path_on_removable_media, uint64_t trace_id = 0);
     void prepare_upload(PrintHostJob &upload_job);
 
 private:
@@ -241,6 +243,7 @@ private:
 	// but once set, it cannot be re-set.
 	std::string 				m_export_path;
 	bool 						m_export_path_on_removable_media = false;
+	std::atomic<uint64_t>        m_export_trace_id { 0 };
 	// Print host upload job to schedule after slicing is complete, used by schedule_upload(),
 	// empty by default (ie. no upload to schedule)
 	PrintHostJob                m_upload_job;

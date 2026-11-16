@@ -58,6 +58,7 @@ namespace UndoRedo {
 namespace sla { class WorkflowManager; }
 
 namespace GUI {
+namespace PrintTrace { struct SaveTime; }
 
 wxDECLARE_EVENT(EVT_SCHEDULE_BACKGROUND_PROCESS, SimpleEvent);
 wxDECLARE_EVENT(EVT_REGENERATE_BED_THUMBNAILS, SimpleEvent);
@@ -468,7 +469,7 @@ public:
 private:
     std::optional<fs_path> get_default_output_file();
     std::optional<wxString> check_output_path_has_error(const boost::filesystem::path& path) const;
-    std::optional<fs_path> get_output_path(const std::string &start_dir, const fs_path &default_output_file);
+    std::optional<fs_path> get_output_path(const std::string &start_dir, const fs_path &default_output_file, PrintTrace::SaveTime &accepted_at);
     std::optional<fs_path> get_multiple_output_dir(const std::string &start_dir);
 
     void export_gcode_to_path(const fs_path &output_path, const std::function<void(bool)> &export_callback);
