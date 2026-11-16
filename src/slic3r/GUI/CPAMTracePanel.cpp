@@ -541,8 +541,8 @@ struct CPAMTracePanel::Impl
             if (choice == wxID_CANCEL) return;
             if (choice == wxID_YES) link = candidate_id;
         }
-        const auto path = chooser.GetPath().ToUTF8();
-        boost::nowide::ifstream input(path.data(), std::ios::binary);
+        const auto path = chooser.GetPath().ToStdString(wxConvUTF8);
+        boost::nowide::ifstream input(path.c_str(), std::ios::binary);
         if (!input) {
             wxMessageBox(_L("The printer log could not be opened."), _L("Import printer log"), wxOK | wxICON_ERROR, &owner);
             return;
@@ -566,8 +566,8 @@ struct CPAMTracePanel::Impl
         if (chooser.ShowModal() != wxID_OK) return;
         const Run *run = find_run(id);
         if (!run) return;
-        const auto path = chooser.GetPath().ToUTF8();
-        boost::nowide::ofstream output(path.data(), std::ios::binary);
+        const auto path = chooser.GetPath().ToStdString(wxConvUTF8);
+        boost::nowide::ofstream output(path.c_str(), std::ios::binary);
         output << "run_id,clock,event,elapsed_ms,free_sram_bytes\r\n";
         const auto write = [&](const std::vector<Event> &events, const char *clock) {
             for (const Event &event : events) {
