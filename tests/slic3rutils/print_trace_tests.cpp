@@ -89,3 +89,100 @@ TEST_CASE("Trace import keeps distinct print attempts and reports missing data",
         return run.export_status == "failed" && !run.removable;
     }) == 1);
 }
+
+TEST_CASE("Live USB records update a linked export and survive restart", "[PrintTrace]")
+{
+    TraceDirectory dir;
+    Store store(dir.path);
+    const auto now = SaveTime::now();
+    const auto export_id = store.begin_export("job.gcode", true, now);
+    store.end_export(export_id, "gcode_saved", "gcode_on_sd", now.steady);
+    Store stale_store(dir.path);
+    REQUIRE(store.track_next_print(export_id));
+    CHECK(store.tracked_export() == export_id);
+
+    const auto revision = store.revision();
+    store.append_live("start\r\nTRACE,0,sele");
+    CHECK_FALSE(store.live_run());
+    CHECK(store.revision() == revision);
+    store.append_live("cted,1840\r\nTRACE,100,ram_sample,17");
+    CHECK_FALSE(store.tracked_export());
+    REQUIRE(store.live_run() == export_id);
+    auto runs = store.snapshot();
+    REQUIRE(runs.size() == 1);
+    CHECK(runs.front().printer_status == "printing");
+    REQUIRE(runs.front().printer.size() == 1);
+
+    store.append_live("50\nTRACE,200,finished,1820\n");
+    store.append_live("TRACE_LOSS,100,1,2\n");
+    std::istringstream competing("TRACE,0,selected,1840\nTRACE,50,finished,1800\n");
+    CHECK(stale_store.import_printer_log(competing, "competing", export_id).imported == 0);
+    CHECK_FALSE(store.track_next_print(export_id));
+    store.end_live_capture();
+    store.end_live_capture();
+    CHECK_FALSE(store.live_run());
+
+    runs = Store(dir.path).snapshot();
+    REQUIRE(runs.size() == 1);
+    CHECK(runs.front().id == export_id);
+    CHECK(runs.front().export_status == "gcode_saved");
+    CHECK(runs.front().printer_status == "completed");
+    REQUIRE(runs.front().printer.size() == 3);
+    CHECK(runs.front().printer[1].free_bytes == 1750);
+    CHECK(runs.front().dropped_samples == 1);
+    CHECK(runs.front().dropped_events == 2);
+    CHECK(runs.front().capture_has_gaps);
+}
+
+TEST_CASE("Live capture separates incomplete attempts across startup and disconnect", "[PrintTrace]")
+{
+    TraceDirectory dir;
+    Store store(dir.path);
+    const auto now = SaveTime::now();
+    const auto export_id = store.begin_export("later.gcode", true, now);
+    store.end_export(export_id, "gcode_saved", "gcode_on_sd", now.steady);
+    REQUIRE(store.track_next_print(export_id));
+    store.append_live("TRACE,100,ram_sample,1800\n");
+    auto partial = store.live_run();
+    REQUIRE(partial);
+    CHECK(partial != export_id);
+    CHECK(store.tracked_export() == export_id);
+    store.append_live("start\n");
+    CHECK_FALSE(store.live_run());
+    CHECK_FALSE(store.tracked_export());
+
+    store.append_live("TRACE,0,selected,1700\nTRACE,100,ram_sample,1690\n");
+    auto second = store.live_run();
+    REQUIRE(second);
+    CHECK(second != partial);
+    store.append_live("TRACE," + std::string(8192, 'x') + "\nTRACE,200,ram_sample,1680\n");
+    store.append_live("TRACE,300,finished,1");
+    store.end_live_capture();
+
+    const auto runs = Store(dir.path).snapshot();
+    REQUIRE(runs.size() == 3);
+    auto previous = std::find_if(runs.begin(), runs.end(), [&](const Run& run) { return run.id == partial; });
+    auto interrupted = std::find_if(runs.begin(), runs.end(), [&](const Run& run) { return run.id == second; });
+    REQUIRE(previous != runs.end());
+    REQUIRE(interrupted != runs.end());
+    CHECK(previous->printer_status == "interrupted");
+    CHECK(previous->capture_has_gaps);
+    CHECK(interrupted->printer_status == "interrupted");
+    CHECK(interrupted->capture_has_gaps);
+    REQUIRE(interrupted->printer.size() == 3);
+    CHECK(interrupted->printer.back().elapsed_ms == 200);
+}
+
+TEST_CASE("Live capture recovers checked-in samples after restart", "[PrintTrace]")
+{
+    TraceDirectory dir;
+    Store store(dir.path);
+    store.append_live("TRACE,0,selected,1700\nTRACE,100,ram_sample,1650\n");
+
+    const auto runs = Store(dir.path).snapshot();
+    REQUIRE(runs.size() == 1);
+    CHECK(runs.front().printer_status == "interrupted");
+    CHECK(runs.front().capture_has_gaps);
+    REQUIRE(runs.front().printer.size() == 2);
+    CHECK(runs.front().printer.back().free_bytes == 1650);
+}

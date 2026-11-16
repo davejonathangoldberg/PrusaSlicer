@@ -4,11 +4,14 @@
 
 #include "CPAMTracePlot.hpp"
 #include "PrintTrace.hpp"
+#include "PrintTraceSerial.hpp"
+#include "slic3r/Utils/Serial.hpp"
 
 #include <algorithm>
 #include <cstdint>
 #include <ctime>
 #include <initializer_list>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -17,6 +20,7 @@
 #include <boost/nowide/fstream.hpp>
 #include <wx/button.h>
 #include <wx/choice.h>
+#include <wx/combobox.h>
 #include <wx/datetime.h>
 #include <wx/dcbuffer.h>
 #include <wx/filedlg.h>
@@ -84,6 +88,8 @@ wxString event_label(const std::string &name)
 
 wxString run_status(const Run &run)
 {
+    if (run.printer_status == "printing") return _L("Recording print");
+    if (run.printer_status == "interrupted") return _L("Capture interrupted");
     if (run.printer_status == "completed") return _L("Completed");
     if (run.printer_status == "cancelled") return _L("Print cancelled");
     if (run.printer_status == "start_failed") return _L("Start failed");
@@ -342,6 +348,24 @@ struct CPAMTracePanel::Impl
         detail->SetScrollRate(margin, margin);
         detail->SetMinSize(owner.FromDIP(wxSize(360, 280)));
         auto *layout = new wxBoxSizer(wxVERTICAL);
+        auto *connection = new wxBoxSizer(wxHORIZONTAL);
+        connection->Add(new wxStaticText(detail, wxID_ANY, _L("USB port")), 0,
+            wxALIGN_CENTER_VERTICAL | wxRIGHT, owner.FromDIP(7));
+        port_picker = new wxComboBox(detail, wxID_ANY);
+        port_picker->SetHint(_L("Select or enter a USB port"));
+        port_picker->SetName(_L("USB port"));
+        port_picker->SetMinSize(owner.FromDIP(wxSize(180, -1)));
+        refresh_ports_button = new wxButton(detail, wxID_ANY, _L("Refresh ports"));
+        connect_button = new wxButton(detail, wxID_ANY, _L("Connect printer"));
+        connection->Add(port_picker, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, owner.FromDIP(7));
+        connection->Add(refresh_ports_button, 0, wxRIGHT, owner.FromDIP(7));
+        connection->Add(connect_button, 0);
+        layout->Add(connection, 0, wxEXPAND | wxBOTTOM, owner.FromDIP(4));
+
+        connection_status = new wxStaticText(detail, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
+            wxST_ELLIPSIZE_END);
+        layout->Add(connection_status, 0, wxEXPAND | wxBOTTOM, margin);
+
         auto *toolbar = new wxBoxSizer(wxHORIZONTAL);
         auto *import_button = new wxButton(detail, wxID_ANY, _L("Import printer log…"));
         export_button = new wxButton(detail, wxID_ANY, _L("Export CSV…"));
@@ -349,6 +373,8 @@ struct CPAMTracePanel::Impl
         range->Append(_L("Startup"));
         range->Append(_L("Full print"));
         range->SetSelection(0);
+        track_button = new wxButton(detail, wxID_ANY, _L("Track next print"));
+        toolbar->Add(track_button, 0, wxRIGHT, owner.FromDIP(7));
         toolbar->Add(import_button, 0, wxRIGHT, owner.FromDIP(7));
         toolbar->Add(export_button, 0);
         toolbar->AddStretchSpacer();
@@ -388,6 +414,11 @@ struct CPAMTracePanel::Impl
             show_run();
         });
         range->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) { show_run(); });
+        port_picker->Bind(wxEVT_TEXT, [this](wxCommandEvent &) { update_capture_controls(); });
+        port_picker->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent &) { update_capture_controls(); });
+        refresh_ports_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { refresh_ports(); });
+        connect_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { toggle_connection(); });
+        track_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { toggle_tracking(); });
         import_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { import_log(); });
         export_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { export_csv(); });
         owner.Bind(wxEVT_TIMER, [this](wxTimerEvent &) {
@@ -401,6 +432,140 @@ struct CPAMTracePanel::Impl
     {
         const auto it = std::find_if(runs.begin(), runs.end(), [id](const Run &run) { return run.id == id; });
         return it == runs.end() ? nullptr : &*it;
+    }
+
+    std::string selected_port() const
+    {
+        const auto shown = port_picker->GetValue();
+        const auto entry = port_picker->GetSelection();
+        if (entry >= 0 && static_cast<std::size_t>(entry) < ports.size() && shown == port_picker->GetString(entry))
+            return ports[entry].port;
+        return wxString(shown).Trim().Trim(false).ToStdString(wxConvUTF8);
+    }
+
+    void refresh_ports()
+    {
+        ports_initialized = true;
+        if (!PrintTrace::SerialReader::supported()) return;
+
+        const auto previous = selected_port();
+        ports = Utils::scan_serial_ports_extended();
+        port_picker->Clear();
+        int selection = wxNOT_FOUND;
+        for (const auto &port : ports) {
+            const auto label = wxString::FromUTF8(port.friendly_name.empty() ? port.port : port.friendly_name);
+            const int entry = port_picker->Append(label);
+            if (port.port == previous || (previous.empty() && port.is_printer && selection == wxNOT_FOUND))
+                selection = entry;
+        }
+        if (selection == wxNOT_FOUND)
+            port_picker->ChangeValue(wxString::FromUTF8(previous));
+        else
+            port_picker->SetSelection(selection);
+        update_capture_controls();
+    }
+
+    void set_connection_error(std::error_code error)
+    {
+        const std::lock_guard<std::mutex> lock(connection_error_mutex);
+        connection_error = error;
+    }
+
+    void stop_capture()
+    {
+        serial.stop();
+        if (!connected_port.empty()) {
+            PrintTrace::store().end_live_capture();
+            connected_port.clear();
+        }
+    }
+
+    void toggle_connection()
+    {
+        if (disconnect_action) {
+            stop_capture();
+            set_connection_error({});
+        } else if (!serial.connected()) {
+            const auto device = selected_port();
+            if (device.empty()) return;
+
+            stop_capture();
+            set_connection_error({});
+            auto *store = &PrintTrace::store();
+            const auto error = serial.start(device,
+                [store](std::string_view bytes) { store->append_live(bytes); },
+                [this, store](std::error_code failure) {
+                    set_connection_error(failure);
+                    store->end_live_capture();
+                });
+            if (error)
+                set_connection_error(error);
+            else
+                connected_port = device;
+        }
+        owner.refresh();
+    }
+
+    void toggle_tracking()
+    {
+        if (!serial.connected()) return;
+        auto &store = PrintTrace::store();
+        if (cancel_tracking_action) {
+            store.track_next_print(std::nullopt);
+        } else if (selected && !store.track_next_print(selected)) {
+            wxMessageBox(_L("Select a saved export with no printer trace."), _L("Track next print"),
+                wxOK | wxICON_INFORMATION, &owner);
+        }
+        owner.refresh();
+    }
+
+    void update_capture_controls()
+    {
+        const bool supported = PrintTrace::SerialReader::supported();
+        const bool connected = serial.connected();
+        if (disconnect_action != connected) {
+            disconnect_action = connected;
+            connect_button->SetLabelText(connected ? _L("Disconnect printer") : _L("Connect printer"));
+        }
+        connect_button->Enable(supported && (connected || !selected_port().empty()));
+        port_picker->Enable(supported && !connected);
+        refresh_ports_button->Enable(supported && !connected);
+
+        const auto tracked = connected ? PrintTrace::store().tracked_export() : std::nullopt;
+        const Run *selected_run = find_run(selected);
+        if (cancel_tracking_action != tracked.has_value()) {
+            cancel_tracking_action = tracked.has_value();
+            track_button->SetLabelText(tracked ? _L("Cancel tracking") : _L("Track next print"));
+        }
+        track_button->Enable(connected && (tracked ||
+            (selected_run && selected_run->export_status == "gcode_saved" && selected_run->printer.empty())));
+
+        wxString status;
+        if (!supported) {
+            status = _L("Live USB capture is unavailable on this platform.");
+        } else if (connected) {
+            const Run *active = find_run(last_live_run);
+            status = _L("Connected to") + " " + wxString::FromUTF8(connected_port) + ". ";
+            status += active && active->printer_status == "printing" ? _L("Recording printer data.")
+                : _L("Waiting for a print. Select the file on the printer LCD.");
+            if (const Run *target = find_run(tracked))
+                status += " " + _L("Next print will link to") + " " + wxString::FromUTF8(target->name) + ".";
+        } else {
+            std::error_code error;
+            {
+                const std::lock_guard<std::mutex> lock(connection_error_mutex);
+                error = connection_error;
+            }
+            status = _L("Connect while the printer is idle. Opening USB can restart the printer.");
+            if (error == std::errc::not_connected)
+                status = _L("Printer disconnected.") + " " + status;
+            else if (error)
+                status = _L("USB capture stopped") + ": " + wxString::FromUTF8(error.message()) + ". " + status;
+        }
+        if (connection_status->GetLabelText() != status) {
+            connection_status->SetLabelText(status);
+            detail->Layout();
+        }
     }
 
     void rebuild_history()
@@ -442,9 +607,9 @@ struct CPAMTracePanel::Impl
         const Run *run = find_run(selected);
         selected_name->SetLabelText(run ? wxString::FromUTF8(run->name) : _L("Select a run"));
         selected_status->SetLabelText(run ? run_status(*run) + "   ·   #" + number(run->id) + "   ·   " +
-            (run->slicer.empty() ? _L("Imported") : _L("Started")) + " " +
+            (run->slicer.empty() && run->id != last_live_run ? _L("Recorded") : _L("Started")) + " " +
             local_time(run->started_at_unix_ms, true) :
-            _L("Export G-code or import a printer log to start the history."));
+            _L("Connect the printer or export G-code to start a run."));
         const auto storage_error = revision ? PrintTrace::store().storage_error() : std::string();
         if (!storage_error.empty()) {
             notice->SetLabelText(wxString::FromUTF8(storage_error));
@@ -522,6 +687,7 @@ struct CPAMTracePanel::Impl
         printer->chart->set_data(printer_end, std::move(printer_spans), nullptr, _L("No completed printer phases."), final);
         detail->Layout();
         detail->FitInside();
+        update_capture_controls();
     }
 
     void import_log()
@@ -590,6 +756,15 @@ struct CPAMTracePanel::Impl
 
     CPAMTracePanel &owner;
     wxTimer timer;
+    PrintTrace::SerialReader serial;
+    std::string connected_port;
+    std::mutex connection_error_mutex;
+    std::error_code connection_error;
+    std::vector<Utils::SerialPortInfo> ports;
+    bool ports_initialized{false};
+    bool disconnect_action{false};
+    bool cancel_tracking_action{false};
+    std::optional<std::uint64_t> last_live_run;
     std::optional<std::uint64_t> revision;
     std::optional<std::uint64_t> selected;
     std::vector<Run> runs;
@@ -597,6 +772,11 @@ struct CPAMTracePanel::Impl
     std::vector<RamSample> samples;
     bool rebuilding{false};
     wxScrolledWindow *detail;
+    wxComboBox *port_picker;
+    wxButton *refresh_ports_button;
+    wxButton *connect_button;
+    wxButton *track_button;
+    wxStaticText *connection_status;
     wxSearchCtrl *filter;
     wxListCtrl *history;
     wxStaticText *selected_name;
@@ -617,18 +797,29 @@ CPAMTracePanel::CPAMTracePanel(wxWindow *parent)
 CPAMTracePanel::~CPAMTracePanel()
 {
     m_impl->timer.Stop();
+    m_impl->stop_capture();
     // The virtual RAM table refers to data owned by the implementation.
     DestroyChildren();
 }
 
 void CPAMTracePanel::refresh()
 {
+    if (!m_impl->ports_initialized) m_impl->refresh_ports();
     auto &store = PrintTrace::store();
     const auto revision = store.revision();
-    if (m_impl->revision == revision) return;
-    m_impl->revision = revision;
-    m_impl->runs = store.snapshot();
-    m_impl->rebuild_history();
+    if (m_impl->revision != revision) {
+        m_impl->revision = revision;
+        m_impl->runs = store.snapshot();
+        const auto live = store.live_run();
+        if (live && live != m_impl->last_live_run && m_impl->filter->GetValue().IsEmpty()) {
+            m_impl->selected = live;
+            m_impl->range->SetSelection(1);
+        }
+        m_impl->last_live_run = live;
+        m_impl->rebuild_history();
+    } else {
+        m_impl->update_capture_controls();
+    }
 }
 
 } // namespace Slic3r::GUI

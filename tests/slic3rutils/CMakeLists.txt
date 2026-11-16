@@ -7,6 +7,7 @@ add_executable(${_TEST_NAME}_tests
     secretstore_tests.cpp
     cpam_trace_plot_tests.cpp
     print_trace_tests.cpp
+    print_trace_serial_tests.cpp
     )
 
 # mold linker for successful linking needs also to link TBB library and link it before libslic3r.

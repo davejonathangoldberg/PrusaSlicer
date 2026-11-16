@@ -5,7 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
-#include <iosfwd>
+#include <fstream>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -62,10 +62,20 @@ public:
     ImportResult import_printer_log(std::istream& input, std::string name,
                                    std::optional<uint64_t> export_id = {});
 
+    // One serial reader supplies raw bytes until it disconnects.
+    void append_live(std::string_view bytes);
+    void end_live_capture();
+    bool track_next_print(std::optional<uint64_t> export_id);
+    std::optional<uint64_t> tracked_export() const;
+    std::optional<uint64_t> live_run() const;
+
 private:
     void load();
-    bool persist(const Run& run, bool attachment = false);
+    bool persist(const Run& run, bool attachment = false, std::optional<std::string_view> first_live_line = {});
     uint64_t allocate_id();
+    void consume_live_line(std::string_view line);
+    void finish_live_run();
+    std::filesystem::path live_path(const Run& run) const;
 
     const std::filesystem::path m_directory;
     mutable std::mutex m_mutex;
@@ -74,6 +84,12 @@ private:
     uint64_t m_revision = 0;
     uint64_t m_next_id = 0;
     std::string m_storage_error;
+    std::optional<uint64_t> m_tracked_export;
+    std::optional<uint64_t> m_live_id;
+    std::optional<uint64_t> m_previous_live_id;
+    std::string m_live_line;
+    bool m_live_line_too_long = false;
+    std::ofstream m_live_output;
 };
 
 Store& store();

@@ -149,6 +149,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrintTrace.cpp
     GUI/PrintTrace.hpp
     GUI/PrintTraceApp.cpp
+    GUI/PrintTraceSerial.cpp
+    GUI/PrintTraceSerial.hpp
     GUI/LoadStepDialog.cpp
     GUI/LoadStepDialog.hpp
     GUI/PresetComboBoxes.hpp
