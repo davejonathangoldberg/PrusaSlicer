@@ -48,6 +48,7 @@ class GalleryDialog;
 class ConnectWebViewPanel; 
 class PrinterWebViewPanel;
 class PrintablesWebViewPanel;
+class CPAMTracePanel;
 
 enum QuickSlice
 {
@@ -104,6 +105,7 @@ class MainFrame : public DPIFrame
     bool                    m_connect_webview_added{ false };
     PrintablesWebViewPanel* m_printables_webview{ nullptr };
     bool                    m_printables_webview_added{ false };
+    CPAMTracePanel*         m_cpam_trace_panel{ nullptr };
     PrinterWebViewPanel*    m_printer_webview{ nullptr };
     bool                    m_printer_webview_added{ false };
 

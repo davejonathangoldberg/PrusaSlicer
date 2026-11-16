@@ -813,7 +813,8 @@ void MainFrame::create_preset_tabs()
     
     m_printables_webview = new PrintablesWebViewPanel(m_tabpanel);
     add_printables_webview_tab();
-    m_tabpanel->AddNewPage(new CPAMTracePanel(m_tabpanel), _L("CPAM Trace"), "");
+    m_cpam_trace_panel = new CPAMTracePanel(m_tabpanel);
+    m_tabpanel->AddNewPage(m_cpam_trace_panel, _L("CPAM Trace"), "");
    
     m_connect_webview = new ConnectWebViewPanel(m_tabpanel);
     m_printer_webview = new PrinterWebViewPanel(m_tabpanel, L"");
@@ -1691,6 +1692,12 @@ void MainFrame::init_menubar_as_editor()
             [this/*, tab_offset*/](wxCommandEvent&) { select_tab(3); }, "printer", nullptr,
             []() {return true; }, this);
         m_changeable_menu_items.push_back(item_printer_tab);
+        append_menu_item(windowMenu, wxID_ANY, _L("CPAM Trace Tab"), _L("Show print trace history"),
+            [this](wxCommandEvent&) {
+                const int page = m_tabpanel->FindPage(m_cpam_trace_panel);
+                if (page != wxNOT_FOUND)
+                    select_tab(static_cast<size_t>(page) + (is_dlg_layout() ? 1 : 0));
+            }, "", nullptr, [this]() { return m_cpam_trace_panel != nullptr; }, this);
         if (m_plater) {
             windowMenu->AppendSeparator();
             append_menu_item(windowMenu, wxID_HIGHEST + 5, _L("3&D") + "\tCtrl+5", _L("Show the 3D editing view"),

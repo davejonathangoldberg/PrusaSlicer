@@ -2,7 +2,8 @@
 
 The **CPAM Trace** tab records normal G-code exports to local storage or an SD
 card and displays USB logs from the MK3S trace firmware. The slicer and printer
-record elapsed time on separate clocks. The slicer starts its clock when you
+record elapsed time on separate clocks. You can also open the tab from
+**Window → CPAM Trace Tab**. The slicer starts its clock when you
 confirm the export destination. The printer starts its clock when the LCD
 accepts the SD file selection.
 
